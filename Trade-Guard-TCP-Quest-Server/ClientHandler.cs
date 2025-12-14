@@ -64,6 +64,17 @@ public class ClientHandler
 				case "JOIN":
 					server.AddPlayer(parts[1], this);
 					break;
+				case "READY":
+					if (!string.IsNullOrEmpty(PlayerId))
+						server.ProcessPlayerReady(PlayerId);
+					break;
+				case "PLAYER_ANIM":
+					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
+					{
+						string animTrigger = parts[1]; 
+						server.BroadcastMessage($"PLAYER_ANIM:{PlayerId},{animTrigger}", this);
+					}
+					break;
 				case "MOVE":
 					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
 					{
@@ -87,18 +98,14 @@ public class ClientHandler
 						}
 					}
 					break;
-				case "EQUIP":
-					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
-					{
-						List<string> equipment = new List<string>(parts[1].Split(','));
-						server.UpdatePlayerEquipment(PlayerId, equipment);
-					}
-					break;
 				case "ATTACK":
 					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
 					{
 						server.ProcessPlayerAction(PlayerId, command, new string[] { parts[1] });
 					}
+					break;
+				case "USE_ITEM":
+					server.ProcessUseItem(PlayerId, parts[1]);
 					break;
 				case "CHAT":
 					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
@@ -109,6 +116,14 @@ public class ClientHandler
 				case "MERCHANT_MOVE_REQUEST":
 					server.ProcessPlayerAction(PlayerId, command, new string[0]);
 					break;
+				case "BUY":
+					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
+						server.ProcessBuyItem(PlayerId, parts[1]);
+					break;
+				case "EXIT":
+					Console.WriteLine($"Игрок {PlayerId} отправил команду выхода.");
+					client.Close();
+					return;
 				default:
 					Console.WriteLine($"Неизвестная команда: {command}");
 					break;

@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
+﻿
 namespace Trade_Guard_TCP_Quest_Server;
 
 public class EnemyState
@@ -11,4 +6,7 @@ public class EnemyState
 	public int Id { get; set; }
 	public Vector3 Position { get; set; }
 	public int Health { get; set; }
+	public DateTime NextAttackTime { get; set; } = DateTime.Now;
+	public bool IsFrozen { get; set; } = false;
+	public DateTime UnfreezeTime { get; set; }
 }

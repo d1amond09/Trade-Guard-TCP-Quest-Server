@@ -15,9 +15,25 @@ public class GameServer
 	private Vector3 merchantPosition;
 	private Vector3 destinationPosition;
 	private List<EnemyState> enemyStates = [];
+	private List<EnemyWave> pendingWaves = new List<EnemyWave>();
 
 	private Timer gameLoopTimer;
 	private GameState currentGameState = GameState.WaitingForPlayers;
+
+	private int merchantMaxHealth = 500;
+	private int merchantHealth;
+
+	private List<Vector3> merchantPath = new List<Vector3>();
+	private int currentWaypointIndex = 0; 
+	private Random random = new Random();
+
+	private readonly Dictionary<string, int> itemPrices = new()
+	{
+		{ "StrengthUpgrade", 50 },
+		{ "HealthPotion", 20 },    
+		{ "ShieldUpgrade", 40 }, 
+		{ "FreezePotion", 60 }
+	};
 
 	public GameServer()
 	{
@@ -26,14 +42,102 @@ public class GameServer
 		listenThread.Start();
 		Console.WriteLine("Сервер запущен. Ожидание подключений...");
 
-		merchantPosition = new Vector3(5, 0, 0);
 		destinationPosition = new Vector3(25, 0, 0);
 
-		enemyStates.Add(new EnemyState { Id = 101, Position = new Vector3(30, 0, 15), Health = 100 });
-		enemyStates.Add(new EnemyState { Id = 102, Position = new Vector3(25, 0, -10), Health = 100 });
-		enemyStates.Add(new EnemyState { Id = 103, Position = new Vector3(29, 0, -14), Health = 100 });
+		ResetServerState();
 		
 		gameLoopTimer = new Timer(GameLoop, null, 0, 100);
+	}
+
+	private void ResetServerState()
+	{
+		Console.WriteLine(">>> СБРОС СОСТОЯНИЯ СЕРВЕРА (Нет игроков) <<<");
+
+		nextPlayerId = 1;
+
+		currentGameState = GameState.WaitingForPlayers;
+
+		merchantHealth = merchantMaxHealth;
+
+		GenerateRandomPath();
+
+
+		enemyStates.Clear();
+		SpawnEnemiesAlongPath();
+
+
+		gameLoopTimer?.Change(0, 100);
+	}
+
+	private void SpawnEnemiesAlongPath()
+	{
+		enemyStates.Clear(); 
+		pendingWaves.Clear(); 
+
+		int enemyCounter = 100;
+
+		for (int i = 1; i < merchantPath.Count - 1; i++)
+		{
+			Vector3 waypoint = merchantPath[i];
+
+			if (random.Next(0, 10) > 2)
+			{
+				EnemyWave wave = new EnemyWave
+				{
+					TriggerPosition = waypoint,
+					Enemies = new List<EnemyState>()
+				};
+
+				int enemiesInGroup = random.Next(2, 5);
+
+				for (int j = 0; j < enemiesInGroup; j++)
+				{
+					float offsetX = random.Next(-10, 11);
+					float offsetZ = random.Next(-10, 11);
+
+					wave.Enemies.Add(new EnemyState
+					{
+						Id = enemyCounter++,
+						Position = new Vector3(waypoint.x + offsetX, 0, waypoint.z + offsetZ),
+						Health = 100,
+						NextAttackTime = DateTime.Now
+					});
+				}
+
+				pendingWaves.Add(wave);
+			}
+		}
+		Console.WriteLine($"Запланировано {pendingWaves.Count} волн врагов.");
+	}
+
+	private void CheckWaveSpawns()
+	{
+		float activationRadius = 15.0f;
+
+		foreach (var wave in pendingWaves)
+		{
+			if (!wave.IsTriggered)
+			{
+				if (Vector3.Distance(merchantPosition, wave.TriggerPosition) <= activationRadius)
+				{
+					wave.IsTriggered = true;
+
+					lock (enemyStates)
+					{
+						foreach (var enemy in wave.Enemies)
+						{
+							enemyStates.Add(enemy);
+
+							string msg = string.Format(CultureInfo.InvariantCulture,
+								"ENEMY_SPAWN:{0},{1},{2},{3},{4}",
+								enemy.Id, enemy.Position.x, enemy.Position.y, enemy.Position.z, enemy.Health);
+							BroadcastMessage(msg);
+						}
+					}
+					Console.WriteLine($"Волна активирована! Появилось {wave.Enemies.Count} врагов.");
+				}
+			}
+		}
 	}
 
 	private void ListenForClients()
@@ -87,7 +191,8 @@ public class GameServer
 				Position = new Vector3(0, 0, 0),
 				Rotation = new Vector3(0, 0, 0),
 				Health = 100,
-				Equipment = []
+				Points = 150,
+				IsReady = false
 			};
 			playerStates.Add(playerId, newPlayer);
 			clientHandler.PlayerId = playerId;
@@ -102,9 +207,10 @@ public class GameServer
 			clientHandler.SendMessage(spawnMessage);
 
 			clientHandler.SendMessage($"PLAYER_HEALTH_UPDATE:{playerId},{newPlayer.Health}");
-
+			clientHandler.SendMessage($"POINTS:{newPlayer.Points}");
 			clientHandler.SendMessage(string.Format(CultureInfo.InvariantCulture, "MERCHANT_POS:{0},{1},{2}", merchantPosition.x, merchantPosition.y, merchantPosition.z));
 			clientHandler.SendMessage(string.Format(CultureInfo.InvariantCulture, "DESTINATION_POS:{0},{1},{2}", destinationPosition.x, destinationPosition.y, destinationPosition.z));
+			clientHandler.SendMessage($"MERCHANT_HEALTH:{merchantHealth},{merchantMaxHealth}");
 
 			lock (enemyStates)
 			{
@@ -135,6 +241,48 @@ public class GameServer
 		}
 	}
 
+	public void ProcessBuyItem(string playerId, string itemType)
+	{
+		lock (playerStates)
+		{
+			if (playerStates.TryGetValue(playerId, out PlayerState player))
+			{
+				if (itemPrices.TryGetValue(itemType, out int price))
+				{
+					if (player.Points >= price)
+					{
+						player.Points -= price;
+
+						switch (itemType)
+						{
+							case "StrengthUpgrade":
+								player.StrengthLevel++;
+								break;
+							case "HealthPotion":
+								player.HealthPotions++;
+								break;
+							case "ShieldUpgrade":
+								player.MaxShield += 20;
+								player.Shield = player.MaxShield;
+								break;
+							case "FreezePotion":
+								player.FreezePotions++;
+								break;
+						}
+
+						ClientHandler client = connectedClients.Find(c => c.PlayerId == playerId);
+						if (client != null)
+						{
+							client.SendMessage($"POINTS:{player.Points}");
+							client.SendMessage($"INVENTORY:{player.HealthPotions},{player.FreezePotions}");
+						}
+
+						Console.WriteLine($"Игрок {playerId} купил {itemType}.");
+					}
+				}
+			}
+		}
+	}
 
 	public void RemovePlayer(string playerId)
 	{
@@ -144,7 +292,11 @@ public class GameServer
 			{
 				playerStates.Remove(playerId);
 				BroadcastMessage($"PLAYER_DESPAWN:{playerId}");
-				Console.WriteLine($"Игрок {playerId} покинул игру.");
+				Console.WriteLine($"Игрок {playerId} покинул игру. Осталось игроков: {playerStates.Count}");
+				if (playerStates.Count == 0)
+				{
+					ResetServerState();
+				}
 			}
 		}
 		lock (connectedClients)
@@ -179,18 +331,6 @@ public class GameServer
 		}
 	}
 
-	public void UpdatePlayerEquipment(string playerId, List<string> equipment)
-	{
-		lock (playerStates)
-		{
-			if (playerStates.ContainsKey(playerId))
-			{
-				playerStates[playerId].Equipment = equipment;
-				BroadcastMessage($"PLAYER_EQUIPMENT_UPDATE:{playerId},{string.Join(",", equipment)}");
-			}
-		}
-	}
-
 	public void ProcessPlayerAction(string playerId, string actionType, string[] args)
 	{
 		if (actionType == "ATTACK")
@@ -208,13 +348,27 @@ public class GameServer
 
 	private void HandlePlayerAttackEnemy(string attackingPlayerId, int targetEnemyId)
 	{
+		PlayerState attacker = null;
+		lock (playerStates)
+		{
+			if (!playerStates.TryGetValue(attackingPlayerId, out attacker))
+			{
+				return; 
+			}
+		}
+
 		lock (enemyStates)
 		{
 			EnemyState targetEnemy = enemyStates.Find(e => e.Id == targetEnemyId);
 			if (targetEnemy != null)
 			{
-				targetEnemy.Health -= 10;
+				int damage = 10 + (attacker.StrengthLevel * 10);
+
+				targetEnemy.Health -= damage;
+
 				BroadcastMessage($"ENEMY_HEALTH_UPDATE:{targetEnemy.Id},{targetEnemy.Health}");
+
+				Console.WriteLine($"Игрок {attackingPlayerId} ударил врага {targetEnemyId} на {damage} урона.");
 
 				if (targetEnemy.Health <= 0)
 				{
@@ -229,19 +383,31 @@ public class GameServer
 	#region Game Loop and AI
 	private void GameLoop(object state)
 	{
-		if (currentGameState != GameState.Playing)
-		{
-			if (currentGameState == GameState.WaitingForPlayers && playerStates.Count > 0)
-			{
-				currentGameState = GameState.Playing;
-				Console.WriteLine("Игра началась!");
-			}
-			return;
-		}
+		if (currentGameState != GameState.Playing) return;
 
+
+		RegenerateShields();
 		UpdateMerchantAI();
+
+		CheckWaveSpawns();
+
 		UpdateEnemiesAI();
 		CheckGameEndConditions();
+	}
+
+	private void RegenerateShields()
+	{
+		lock (playerStates)
+		{
+			foreach (var player in playerStates.Values)
+			{
+				if ((DateTime.Now - player.LastDamageTime).TotalSeconds > 5.0 && player.Shield < player.MaxShield)
+				{
+					player.Shield++;
+					BroadcastMessage($"PLAYER_STATUS:{player.Id},{player.Health},{player.Shield}");
+				}
+			}
+		}
 	}
 
 	private void UpdateMerchantAI()
@@ -251,7 +417,7 @@ public class GameServer
 		{
 			foreach (var enemy in enemyStates)
 			{
-				if (Vector3.Distance(merchantPosition, enemy.Position) < 8f)
+				if (Vector3.Distance(merchantPosition, enemy.Position) < 8f && !enemy.IsFrozen)
 				{
 					isEnemyNear = true;
 					break;
@@ -259,9 +425,17 @@ public class GameServer
 			}
 		}
 
-		if (!isEnemyNear && Vector3.Distance(merchantPosition, destinationPosition) > 1.0f)
+		if (!isEnemyNear && merchantPath.Count > 0 && currentWaypointIndex < merchantPath.Count)
 		{
-			merchantPosition = Vector3.MoveTowards(merchantPosition, destinationPosition, 2.0f * 0.1f);
+			Vector3 targetWaypoint = merchantPath[currentWaypointIndex];
+			merchantPosition = Vector3.MoveTowards(merchantPosition, targetWaypoint, 2.0f * 0.1f); 
+
+			if (Vector3.Distance(merchantPosition, targetWaypoint) < 0.5f)
+			{
+				currentWaypointIndex++;
+				Console.WriteLine($"Торговец достиг точки {currentWaypointIndex} из {merchantPath.Count}");
+			}
+
 			BroadcastMessage(string.Format(CultureInfo.InvariantCulture, "MERCHANT_POS:{0},{1},{2}", merchantPosition.x, merchantPosition.y, merchantPosition.z));
 		}
 	}
@@ -272,6 +446,19 @@ public class GameServer
 		{
 			foreach (var enemy in enemyStates)
 			{
+				if (enemy.IsFrozen)
+				{
+					if (DateTime.Now >= enemy.UnfreezeTime)
+					{
+						enemy.IsFrozen = false;
+						BroadcastMessage($"ENEMY_FREEZE:{enemy.Id},0");
+					}
+					else
+					{
+						continue;
+					}
+				}
+
 				Vector3 targetPosition = Vector3.Zero;
 				float minDistance = float.MaxValue;
 				string targetId = null;
@@ -299,11 +486,36 @@ public class GameServer
 
 				if (targetId != null)
 				{
-					if (minDistance < 1.5f)
+
+					float stopDistance = 2.5f;
+
+					if (targetId.Equals("Merchant"))
 					{
-						if (!targetId.Equals("Merchant"))
+						stopDistance = 4.5f;
+					}
+					if (minDistance <= stopDistance)
+					{
+						if (DateTime.Now >= enemy.NextAttackTime)
 						{
-							DamagePlayer(targetId, 5);
+							enemy.NextAttackTime = DateTime.Now.AddSeconds(2.0);
+
+							BroadcastMessage($"ENEMY_ANIM:{enemy.Id},Attack");
+
+							if (targetId.Equals("Merchant"))
+							{
+								merchantHealth -= 5;
+								BroadcastMessage($"MERCHANT_HEALTH:{merchantHealth},{merchantMaxHealth}");
+								if (merchantHealth <= 0)
+								{
+									currentGameState = GameState.Defeat;
+									BroadcastMessage("GAME_END:DEFEAT");
+									gameLoopTimer.Change(Timeout.Infinite, Timeout.Infinite);
+								}
+							}
+							else
+							{
+								DamagePlayer(targetId, 5);
+							}
 						}
 					}
 					else
@@ -316,6 +528,24 @@ public class GameServer
 		}
 	}
 
+	private void FreezeEnemies()
+	{
+		lock (enemyStates)
+		{
+			Console.WriteLine("Использовано зелье заморозки! Все враги остановлены.");
+			foreach (var enemy in enemyStates)
+			{
+				enemy.UnfreezeTime = DateTime.Now.AddSeconds(5.0);
+
+				if (!enemy.IsFrozen)
+				{
+					enemy.IsFrozen = true;
+					BroadcastMessage($"ENEMY_FREEZE:{enemy.Id},1");
+				}
+			}
+		}
+	}
+
 	public void DamagePlayer(string playerId, int damage)
 	{
 		lock (playerStates)
@@ -323,26 +553,101 @@ public class GameServer
 			if (playerStates.ContainsKey(playerId))
 			{
 				PlayerState player = playerStates[playerId];
-				player.Health -= damage;
-				if (player.Health < 0) player.Health = 0;
+				player.LastDamageTime = DateTime.Now; 
 
-				BroadcastMessage($"PLAYER_HEALTH_UPDATE:{playerId},{player.Health}");
+				int damageRemaining = damage;
+
+				if (player.Shield > 0)
+				{
+					if (player.Shield >= damageRemaining)
+					{
+						player.Shield -= damageRemaining;
+						damageRemaining = 0;
+					}
+					else
+					{
+						damageRemaining -= player.Shield;
+						player.Shield = 0;
+					}
+				}
+
+				if (damageRemaining > 0)
+				{
+					player.Health -= damageRemaining;
+					if (player.Health < 0) player.Health = 0;
+				}
+
+				BroadcastMessage($"PLAYER_STATUS:{playerId},{player.Health},{player.Shield}");
 
 				if (player.Health <= 0)
 				{
-					Console.WriteLine($"Игрок {playerId} погиб.");
+					Console.WriteLine($"Игрок {player.Username} погиб!");
 				}
 			}
 		}
 	}
 
+	public void ProcessUseItem(string playerId, string itemType)
+	{
+		lock (playerStates)
+		{
+			PlayerState player = playerStates[playerId];
+
+			if (itemType == "HealthPotion" && player.HealthPotions > 0)
+			{
+				player.HealthPotions--;
+				player.Health += 50;
+				if (player.Health > player.MaxHealth) player.Health = player.MaxHealth;
+
+				ClientHandler client = connectedClients.Find(c => c.PlayerId == playerId);
+				client.SendMessage($"INVENTORY:{player.HealthPotions},{player.FreezePotions}");
+				BroadcastMessage($"PLAYER_STATUS:{playerId},{player.Health},{player.Shield}");
+			}
+			else if (itemType == "FreezePotion" && player.FreezePotions > 0)
+			{
+				player.FreezePotions--;
+				FreezeEnemies();
+
+				ClientHandler client = connectedClients.Find(c => c.PlayerId == playerId);
+				client.SendMessage($"INVENTORY:{player.HealthPotions},{player.FreezePotions}");
+			}
+		}
+	}
+
+	public void ProcessPlayerReady(string playerId)
+	{
+		lock (playerStates)
+		{
+			if (playerStates.ContainsKey(playerId))
+			{
+				playerStates[playerId].IsReady = true;
+				Console.WriteLine($"Игрок {playerId} готов!");
+
+				CheckStartGame();
+			}
+		}
+	}
+
+	private void CheckStartGame()
+	{
+		if (playerStates.Count > 0 && playerStates.Values.All(p => p.IsReady))
+		{
+			currentGameState = GameState.Playing;
+			Console.WriteLine("Все игроки готовы. Игра началась!");
+			BroadcastMessage("GAME_START");
+		}
+	}
+
 	private void CheckGameEndConditions()
 	{
-		if (Vector3.Distance(merchantPosition, destinationPosition) <= 1.0f)
+		bool isAtFinalDestination = currentWaypointIndex >= merchantPath.Count 
+			|| Vector3.Distance(merchantPosition, merchantPath[merchantPath.Count - 1]) < 1.0f;
+
+		if (isAtFinalDestination)
 		{
 			currentGameState = GameState.Victory;
 			BroadcastMessage("GAME_END:VICTORY");
-			Console.WriteLine("Победа! Торговец достиг цели.");
+			Console.WriteLine("Победа! Торговец прошел весь маршрут.");
 			gameLoopTimer.Change(Timeout.Infinite, Timeout.Infinite);
 		}
 
@@ -357,4 +662,38 @@ public class GameServer
 		}
 	}
 	#endregion
+
+
+	private void GenerateRandomPath()
+	{
+		merchantPath.Clear();
+		currentWaypointIndex = 0;
+
+		Vector3 startPoint = new Vector3(3, 1f, 0);
+		merchantPath.Add(startPoint);
+		merchantPosition = startPoint;
+
+		float finalX = 300f;
+
+		int segments = 15;
+
+		float startX = 5f;
+		float stepX = (finalX - startX) / segments;
+
+		float currentZ = 0; 
+
+		for (int i = 1; i < segments; i++)
+		{
+			float x = startX + (stepX * i);
+
+			float z = random.Next(-30, 31);
+
+			merchantPath.Add(new Vector3(x, 1f, z));
+		}
+
+		destinationPosition = new Vector3(finalX, 1f, 0);
+		merchantPath.Add(destinationPosition);
+
+		Console.WriteLine($"Сгенерирован маршрут на {segments} точек. Финиш на X={finalX}");
+	}
 }
