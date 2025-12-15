@@ -20,4 +20,7 @@ public class PlayerState
 
 	public int Points { get; set; } = 150;
 	public bool IsReady { get; set; } = false;
+
+	public bool IsDead { get; set; } = false;
+	public DateTime RespawnTime { get; set; }
 }

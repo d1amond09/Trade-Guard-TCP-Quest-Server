@@ -434,6 +434,7 @@ public class GameServer
 		UpdateMerchantAI();
 
 		CheckWaveSpawns();
+		ProcessRespawns();
 
 		UpdateEnemiesAI();
 		CheckGameEndConditions();
@@ -597,6 +598,8 @@ public class GameServer
 		{
 			if (playerStates.TryGetValue(playerId, out PlayerState? player))
 			{
+				if (player.IsDead) return;
+
 				player.LastDamageTime = DateTime.Now; 
 
 				int damageRemaining = damage;
@@ -625,7 +628,56 @@ public class GameServer
 
 				Console.WriteLine($"Игрок {playerId}: Урон {damage}. Стало: HP={player.Health}, Shield={player.Shield}");
 
-				if (player.Health <= 0) Console.WriteLine($"Игрок {player.Username} погиб!");
+				if (player.Health <= 0)
+				{
+					int respawnTime = 30;
+					player.IsDead = true;
+					player.RespawnTime = DateTime.Now.AddSeconds(respawnTime);
+
+					Console.WriteLine($"Игрок {player.Username} погиб. Возрождение через {respawnTime} сек.");
+
+					BroadcastMessage($"PLAYER_DIED:{playerId},{respawnTime}");
+
+					CheckAllPlayersDead();
+				}
+			}
+		}
+	}
+
+	private void CheckAllPlayersDead()
+	{
+		if (playerStates.Count > 0 && playerStates.Values.All(p => p.IsDead))
+		{
+			currentGameState = GameState.Defeat;
+			BroadcastMessage("GAME_END:DEFEAT");
+			Console.WriteLine("Все игроки погибли. Игра окончена.");
+			gameLoopTimer.Change(Timeout.Infinite, Timeout.Infinite);
+		}
+	}
+
+	private void ProcessRespawns()
+	{
+		lock (playerStates)
+		{
+			foreach (var player in playerStates.Values)
+			{
+				if (player.IsDead && DateTime.Now >= player.RespawnTime)
+				{
+					player.IsDead = false;
+					player.Health = player.MaxHealth;
+					player.Shield = player.MaxShield; 
+
+					Vector3 spawnPos = new Vector3(merchantPosition.x - 2, 0, merchantPosition.z);
+					player.Position = spawnPos;
+
+					Console.WriteLine($"Игрок {player.Username} воскрес!");
+
+					BroadcastMessage(string.Format(CultureInfo.InvariantCulture,
+						"PLAYER_RESPAWN:{0},{1},{2},{3}",
+						player.Id, spawnPos.x, spawnPos.y, spawnPos.z));
+
+					BroadcastMessage($"PLAYER_STATUS:{player.Id},{player.Health},{player.Shield}");
+				}
 			}
 		}
 	}
@@ -679,6 +731,18 @@ public class GameServer
 			Console.WriteLine("Все игроки готовы. Игра началась!");
 			BroadcastMessage("GAME_START");
 			BroadcastMessage($"WAVE_STATUS:{currentWaveCount},{totalWavesCount}");
+
+			lock (connectedClients)
+			{
+				foreach (var client in connectedClients)
+				{
+					if (playerStates.TryGetValue(client.PlayerId, out PlayerState p))
+					{
+						client.SendMessage($"INVENTORY:{p.HealthPotions},{p.FreezePotions}");
+						client.SendMessage($"PLAYER_STATUS:{p.Id},{p.Health},{p.Shield}");
+					}
+				}
+			}
 		}
 	}
 
