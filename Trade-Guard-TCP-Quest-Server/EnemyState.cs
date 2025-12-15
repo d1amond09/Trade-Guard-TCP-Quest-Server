@@ -9,4 +9,5 @@ public class EnemyState
 	public DateTime NextAttackTime { get; set; } = DateTime.Now;
 	public bool IsFrozen { get; set; } = false;
 	public DateTime UnfreezeTime { get; set; }
+	public int EnemyType { get; set; } = 0;
 }

@@ -118,7 +118,12 @@ public class ClientHandler
 					break;
 				case "BUY":
 					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
-						server.ProcessBuyItem(PlayerId, parts[1]);
+						server.ProcessShopAction(PlayerId, "BUY", parts[1]);
+					break;
+
+				case "SELL":
+					if (!string.IsNullOrEmpty(PlayerId) && parts.Length > 1)
+						server.ProcessShopAction(PlayerId, "SELL", parts[1]);
 					break;
 				case "EXIT":
 					Console.WriteLine($"Игрок {PlayerId} отправил команду выхода.");
